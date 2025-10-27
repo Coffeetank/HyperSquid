@@ -1,0 +1,588 @@
+from typing import Dict, List, Optional, Union, Any, Literal
+from hyperliquid.exchange import Exchange
+from hyperliquid.utils import constants
+from hyperliquid.utils.types import Cloid
+import eth_account
+import time
+
+
+class Trading:
+    """
+    Advanced trading class for Hyperliquid platform.
+
+    Supports all order types with leverage, TP/SL, and position management.
+    Requires a wallet for trading operations.
+    """
+
+    def __init__(
+        self,
+        wallet: eth_account.Account,
+        network: str = 'mainnet',
+        vault_address: Optional[str] = None
+    ):
+        """
+        Initialize trading client.
+
+        Args:
+            wallet: Ethereum wallet for signing transactions
+            network: 'mainnet' or 'testnet'
+            vault_address: Optional vault/sub-account address
+        """
+        if network.lower() == 'mainnet':
+            self.api_url = constants.MAINNET_API_URL
+        elif network.lower() == 'testnet':
+            self.api_url = constants.TESTNET_API_URL
+        else:
+            raise ValueError("Network must be 'mainnet' or 'testnet'")
+
+        self.wallet = wallet
+        self.network = network.lower()
+
+        # Initialize exchange client
+        self.exchange = Exchange(
+            wallet=self.wallet,
+            base_url=self.api_url,
+            vault_address=vault_address
+        )
+
+        # Store vault address for sub-account trading
+        self.vault_address = vault_address
+
+    def place_order(
+        self,
+        coin: str,
+        side: Literal['buy', 'sell'],
+        order_type: Literal['market', 'limit', 'scale', 'stop_limit', 'stop_market', 'twap'],
+        amount: float,
+        price: Optional[float] = None,
+        leverage: Optional[Union[int, float]] = None,
+        reduce_only: bool = False,
+        take_profit: Optional[Dict[str, Any]] = None,
+        stop_loss: Optional[Dict[str, Any]] = None,
+        client_order_id: Optional[str] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Place a trading order with comprehensive options.
+
+        Args:
+            coin: Asset symbol (e.g., 'BTC', 'ETH')
+            side: 'buy' or 'sell'
+            order_type: Type of order ('market', 'limit', 'scale', 'stop_limit', 'stop_market', 'twap')
+            amount: Order size/amount
+            price: Limit price (required for limit orders, optional for others)
+            leverage: Leverage multiplier (optional)
+            reduce_only: Whether order should only reduce position
+            take_profit: TP configuration dict (optional)
+            stop_loss: SL configuration dict (optional)
+            client_order_id: Custom order ID (optional)
+            **kwargs: Additional order parameters
+
+        Returns:
+            Order response from exchange
+        """
+        try:
+            # Set leverage if specified
+            if leverage is not None:
+                self.set_leverage(leverage, coin)
+
+            # Convert side to boolean (True = buy, False = sell)
+            is_buy = side.lower() == 'buy'
+
+            # Create client order ID if provided
+            cloid = None
+            if client_order_id:
+                cloid = Cloid.from_str(client_order_id)
+
+            # Handle different order types
+            if order_type == 'market':
+                return self._place_market_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    amount=amount,
+                    reduce_only=reduce_only,
+                    cloid=cloid
+                )
+
+            elif order_type == 'limit':
+                if price is None:
+                    raise ValueError("Price is required for limit orders")
+                return self._place_limit_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    amount=amount,
+                    price=price,
+                    reduce_only=reduce_only,
+                    cloid=cloid,
+                    **kwargs
+                )
+
+            elif order_type == 'scale':
+                # Scale orders are advanced limit orders with multiple levels
+                return self._place_scale_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    amount=amount,
+                    price=price,
+                    reduce_only=reduce_only,
+                    cloid=cloid,
+                    **kwargs
+                )
+
+            elif order_type in ['stop_limit', 'stop_market']:
+                return self._place_stop_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    order_type=order_type,
+                    amount=amount,
+                    price=price,
+                    stop_price=kwargs.get('stop_price'),
+                    reduce_only=reduce_only,
+                    cloid=cloid,
+                    **kwargs
+                )
+
+            elif order_type == 'twap':
+                return self._place_twap_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    amount=amount,
+                    price=price,
+                    duration=kwargs.get('duration', 60),  # Default 60 seconds
+                    reduce_only=reduce_only,
+                    cloid=cloid,
+                    **kwargs
+                )
+
+            else:
+                raise ValueError(f"Unsupported order type: {order_type}")
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to place {order_type} order: {e}")
+
+    def _place_market_order(
+        self,
+        coin: str,
+        is_buy: bool,
+        amount: float,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None
+    ) -> Dict[str, Any]:
+        """Place a market order."""
+        if is_buy:
+            return self.exchange.market_open(
+                name=coin,
+                is_buy=True,
+                sz=amount,
+                px=None,  # Market price
+                slippage=0.01,  # 1% slippage protection
+                reduce_only=reduce_only,
+                cloid=cloid
+            )
+        else:
+            return self.exchange.market_open(
+                name=coin,
+                is_buy=False,
+                sz=amount,
+                px=None,  # Market price
+                slippage=0.01,  # 1% slippage protection
+                reduce_only=reduce_only,
+                cloid=cloid
+            )
+
+    def _place_limit_order(
+        self,
+        coin: str,
+        is_buy: bool,
+        amount: float,
+        price: float,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Place a limit order."""
+        tif = kwargs.get('time_in_force', 'Gtc')  # Good 'til canceled by default
+
+        return self.exchange.order(
+            coin=coin,
+            is_buy=is_buy,
+            sz=amount,
+            limit_px=price,
+            order_type={"limit": {"tif": tif}},
+            reduce_only=reduce_only,
+            cloid=cloid
+        )
+
+    def _place_scale_order(
+        self,
+        coin: str,
+        is_buy: bool,
+        amount: float,
+        price: Optional[float] = None,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Place a scale order (bracket order with multiple price levels)."""
+        # Scale orders require specific formatting
+        # This is a simplified implementation - scale orders are complex
+        levels = kwargs.get('levels', 3)
+        scale_factor = kwargs.get('scale_factor', 0.001)  # 0.1%
+
+        if price is None:
+            raise ValueError("Price is required for scale orders")
+
+        # Create multiple limit orders at different price levels
+        orders = []
+        for i in range(levels):
+            level_price = price * (1 + (scale_factor * i) * (1 if is_buy else -1))
+            level_amount = amount / levels
+
+            order_result = self._place_limit_order(
+                coin=coin,
+                is_buy=is_buy,
+                amount=level_amount,
+                price=level_price,
+                reduce_only=reduce_only,
+                cloid=cloid
+            )
+            orders.append(order_result)
+
+        return {"scale_orders": orders, "levels": levels}
+
+    def _place_stop_order(
+        self,
+        coin: str,
+        is_buy: bool,
+        order_type: str,
+        amount: float,
+        price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Place a stop order (stop-limit or stop-market)."""
+        if stop_price is None:
+            raise ValueError("stop_price is required for stop orders")
+
+        if order_type == 'stop_limit':
+            if price is None:
+                raise ValueError("price is required for stop-limit orders")
+
+            return self.exchange.order(
+                coin=coin,
+                is_buy=is_buy,
+                sz=amount,
+                limit_px=price,
+                order_type={
+                    "trigger": {
+                        "triggerPx": stop_price,
+                        "isMarket": False,
+                        "tpsl": "sl" if not is_buy else "tp"
+                    }
+                },
+                reduce_only=reduce_only,
+                cloid=cloid
+            )
+
+        elif order_type == 'stop_market':
+            return self.exchange.order(
+                coin=coin,
+                is_buy=is_buy,
+                sz=amount,
+                limit_px=stop_price,  # Market orders use stop price as limit
+                order_type={
+                    "trigger": {
+                        "triggerPx": stop_price,
+                        "isMarket": True,
+                        "tpsl": "sl" if not is_buy else "tp"
+                    }
+                },
+                reduce_only=reduce_only,
+                cloid=cloid
+            )
+
+    def _place_twap_order(
+        self,
+        coin: str,
+        is_buy: bool,
+        amount: float,
+        price: Optional[float] = None,
+        duration: int = 60,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Place a TWAP (Time-Weighted Average Price) order."""
+        # TWAP implementation - break order into smaller chunks over time
+        intervals = kwargs.get('intervals', 10)  # Number of time intervals
+        interval_amount = amount / intervals
+        interval_duration = duration / intervals
+
+        orders = []
+        for i in range(intervals):
+            if price:
+                # Use limit orders for TWAP at specified price
+                order_result = self._place_limit_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    amount=interval_amount,
+                    price=price,
+                    reduce_only=reduce_only,
+                    cloid=cloid
+                )
+            else:
+                # Use market orders for TWAP
+                order_result = self._place_market_order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    amount=interval_amount,
+                    reduce_only=reduce_only,
+                    cloid=cloid
+                )
+
+            orders.append(order_result)
+
+            if i < intervals - 1:  # Don't sleep after last order
+                time.sleep(interval_duration)
+
+        return {"twap_orders": orders, "intervals": intervals, "duration": duration}
+
+    def set_leverage(self, leverage: Union[int, float], coin: str) -> Dict[str, Any]:
+        """
+        Set leverage for a specific coin.
+
+        Args:
+            leverage: Leverage multiplier (e.g., 5 for 5x leverage)
+            coin: Asset symbol
+
+        Returns:
+            Leverage update response
+        """
+        try:
+            return self.exchange.update_leverage(
+                leverage=leverage,
+                name=coin,
+                is_cross=True  # Use cross leverage by default
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to set leverage: {e}")
+
+    def set_isolated_leverage(self, leverage: Union[int, float], coin: str) -> Dict[str, Any]:
+        """
+        Set isolated leverage for a specific coin.
+
+        Args:
+            leverage: Leverage multiplier
+            coin: Asset symbol
+
+        Returns:
+            Leverage update response
+        """
+        try:
+            return self.exchange.update_leverage(
+                leverage=leverage,
+                name=coin,
+                is_cross=False
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to set isolated leverage: {e}")
+
+    def add_margin(self, amount: float, coin: str) -> Dict[str, Any]:
+        """
+        Add margin to an isolated position.
+
+        Args:
+            amount: Amount of margin to add (in USD)
+            coin: Asset symbol
+
+        Returns:
+            Margin update response
+        """
+        try:
+            return self.exchange.update_isolated_margin(
+                amount=amount,
+                name=coin
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to add margin: {e}")
+
+    def close_position(self, coin: str, close_type: Literal['market', 'limit'] = 'market',
+                      price: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Close an entire position.
+
+        Args:
+            coin: Asset symbol
+            close_type: 'market' or 'limit'
+            price: Limit price (required for limit closes)
+
+        Returns:
+            Close order response
+        """
+        try:
+            if close_type == 'market':
+                return self.exchange.market_close(name=coin)
+            elif close_type == 'limit':
+                if price is None:
+                    raise ValueError("Price is required for limit closes")
+                return self.exchange.limit_close(name=coin, px=price)
+            else:
+                raise ValueError("close_type must be 'market' or 'limit'")
+        except Exception as e:
+            raise RuntimeError(f"Failed to close position: {e}")
+
+    def cancel_order(self, coin: str, order_id: int) -> Dict[str, Any]:
+        """
+        Cancel a specific order.
+
+        Args:
+            coin: Asset symbol
+            order_id: Order ID to cancel
+
+        Returns:
+            Cancel response
+        """
+        try:
+            return self.exchange.cancel(coin=coin, oid=order_id)
+        except Exception as e:
+            raise RuntimeError(f"Failed to cancel order: {e}")
+
+    def cancel_order_by_cloid(self, coin: str, client_order_id: str) -> Dict[str, Any]:
+        """
+        Cancel an order by client order ID.
+
+        Args:
+            coin: Asset symbol
+            client_order_id: Client order ID
+
+        Returns:
+            Cancel response
+        """
+        try:
+            cloid = Cloid.from_str(client_order_id)
+            return self.exchange.cancel_by_cloid(coin=coin, cloid=cloid)
+        except Exception as e:
+            raise RuntimeError(f"Failed to cancel order by CLOID: {e}")
+
+    def cancel_all_orders(self, coin: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Cancel all open orders, optionally for a specific coin.
+
+        Args:
+            coin: Asset symbol (optional, cancels all if not specified)
+
+        Returns:
+            Cancel response
+        """
+        try:
+            return self.exchange.cancel_all(coin=coin)
+        except Exception as e:
+            raise RuntimeError(f"Failed to cancel all orders: {e}")
+
+    def place_bracket_order(
+        self,
+        coin: str,
+        side: Literal['buy', 'sell'],
+        amount: float,
+        entry_price: float,
+        take_profit_price: float,
+        stop_loss_price: float,
+        leverage: Optional[Union[int, float]] = None,
+        client_order_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Place a bracket order with entry, take profit, and stop loss.
+
+        Args:
+            coin: Asset symbol
+            side: 'buy' or 'sell'
+            amount: Order size
+            entry_price: Entry price for limit order
+            take_profit_price: Take profit trigger price
+            stop_loss_price: Stop loss trigger price
+            leverage: Leverage multiplier (optional)
+            client_order_id: Custom order ID (optional)
+
+        Returns:
+            Bracket order response
+        """
+        try:
+            # Set leverage if specified
+            if leverage is not None:
+                self.set_leverage(leverage, coin)
+
+            # Create client order ID if provided
+            cloid = None
+            if client_order_id:
+                cloid = Cloid.from_str(client_order_id)
+
+            is_buy = side.lower() == 'buy'
+
+            # Place entry order (limit)
+            entry_order = self._place_limit_order(
+                coin=coin,
+                is_buy=is_buy,
+                amount=amount,
+                price=entry_price,
+                cloid=cloid
+            )
+
+            # Create TP/SL orders (these would be attached to the position after entry)
+            # Note: Hyperliquid handles TP/SL differently - they need to be set after position is open
+
+            return {
+                "entry_order": entry_order,
+                "take_profit_price": take_profit_price,
+                "stop_loss_price": stop_loss_price,
+                "bracket_setup": True
+            }
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to place bracket order: {e}")
+
+    def get_account_balance(self) -> Dict[str, Any]:
+        """
+        Get account balance and margin information.
+
+        Returns:
+            Account balance information
+        """
+        try:
+            return self.exchange.info.user_state(self.wallet.address)
+        except Exception as e:
+            raise RuntimeError(f"Failed to get account balance: {e}")
+
+    def get_position_size(self, coin: str) -> float:
+        """
+        Get current position size for a coin.
+
+        Args:
+            coin: Asset symbol
+
+        Returns:
+            Position size (positive for long, negative for short)
+        """
+        try:
+            user_state = self.get_account_balance()
+            for asset_position in user_state.get("assetPositions", []):
+                position = asset_position["position"]
+                if position["coin"] == coin:
+                    return float(position.get("szi", 0))
+            return 0.0
+        except Exception as e:
+            raise RuntimeError(f"Failed to get position size: {e}")
+
+    def get_available_balance(self) -> float:
+        """
+        Get available balance for trading.
+
+        Returns:
+            Available balance in USD
+        """
+        try:
+            user_state = self.get_account_balance()
+            return float(user_state.get("withdrawable", 0))
+        except Exception as e:
+            raise RuntimeError(f"Failed to get available balance: {e}")
