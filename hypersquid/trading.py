@@ -19,7 +19,8 @@ class Trading:
         self,
         wallet: eth_account.Account,
         network: str = 'mainnet',
-        vault_address: Optional[str] = None
+        vault_address: Optional[str] = None,
+        debug: bool = True
     ):
         """
         Initialize trading client.
@@ -38,6 +39,7 @@ class Trading:
 
         self.wallet = wallet
         self.network = network.lower()
+        self.debug = debug
 
         # Initialize exchange client
         self.exchange = Exchange(
@@ -202,6 +204,15 @@ class Trading:
         if amount_q <= 0:
             raise ValueError("Order size becomes zero after quantization")
         if is_buy:
+            if self.debug:
+                print("[DEBUG] market_open", {
+                    "coin": coin,
+                    "is_buy": True,
+                    "sz": amount_q,
+                    "px": None,
+                    "slippage": 0.01,
+                    "cloid": str(cloid) if cloid else None
+                })
             return self.exchange.market_open(
                 name=coin,
                 is_buy=True,
@@ -211,6 +222,15 @@ class Trading:
                 cloid=cloid
             )
         else:
+            if self.debug:
+                print("[DEBUG] market_open", {
+                    "coin": coin,
+                    "is_buy": False,
+                    "sz": amount_q,
+                    "px": None,
+                    "slippage": 0.01,
+                    "cloid": str(cloid) if cloid else None
+                })
             return self.exchange.market_open(
                 name=coin,
                 is_buy=False,
@@ -236,12 +256,28 @@ class Trading:
         if amount_q <= 0:
             raise ValueError("Order size becomes zero after quantization")
 
+        payload = (
+            coin,
+            is_buy,
+            amount_q,
+            price_q,
+            {"limit": {"tif": tif}},
+        )
+        if self.debug:
+            print("[DEBUG] order limit", {
+                "coin": coin,
+                "is_buy": is_buy,
+                "sz": amount_q,
+                "limit_px": price_q,
+                "order_type": {"limit": {"tif": tif}},
+                "cloid": str(cloid) if cloid else None
+            })
         return self.exchange.order(
-            coin=coin,
-            is_buy=is_buy,
-            sz=amount_q,
-            limit_px=price_q,
-            order_type={"limit": {"tif": tif}},
+            coin,
+            is_buy,
+            amount_q,
+            price_q,
+            {"limit": {"tif": tif}},
             cloid=cloid
         )
 
@@ -294,6 +330,7 @@ class Trading:
         amount: float,
         price: Optional[float] = None,
         stop_price: Optional[float] = None,
+        tpsl: Literal['tp', 'sl'] = 'sl',
         cloid: Optional[Cloid] = None,
         **kwargs
     ) -> Dict[str, Any]:
@@ -310,34 +347,58 @@ class Trading:
             if price is None:
                 raise ValueError("price is required for stop-limit orders")
 
+            order_type_obj = {
+                "trigger": {
+                    "triggerPx": stop_price_q,
+                    "isMarket": False,
+                    "tpsl": tpsl
+                }
+            }
+
+            if self.debug:
+                print("[DEBUG] order stop_limit", {
+                    "coin": coin,
+                    "is_buy": is_buy,
+                    "sz": amount_q,
+                    "limit_px": price_q,
+                    "order_type": order_type_obj,
+                    "cloid": str(cloid) if cloid else None
+                })
+
             return self.exchange.order(
-                coin=coin,
-                is_buy=is_buy,
-                sz=amount_q,
-                limit_px=price_q,
-                order_type={
-                    "trigger": {
-                        "triggerPx": stop_price_q,
-                        "isMarket": False,
-                        "tpsl": "sl" if not is_buy else "tp"
-                    }
-                },
+                coin,
+                is_buy,
+                amount_q,
+                price_q,
+                order_type_obj,
                 cloid=cloid
             )
 
         elif order_type == 'stop_market':
+            order_type_obj = {
+                "trigger": {
+                    "triggerPx": stop_price_q,
+                    "isMarket": True,
+                    "tpsl": tpsl
+                }
+            }
+
+            if self.debug:
+                print("[DEBUG] order stop_market", {
+                    "coin": coin,
+                    "is_buy": is_buy,
+                    "sz": amount_q,
+                    "limit_px": None,
+                    "order_type": order_type_obj,
+                    "cloid": str(cloid) if cloid else None
+                })
+
             return self.exchange.order(
-                coin=coin,
-                is_buy=is_buy,
-                sz=amount_q,
-                limit_px=stop_price_q,  # Market orders use stop price as limit
-                order_type={
-                    "trigger": {
-                        "triggerPx": stop_price_q,
-                        "isMarket": True,
-                        "tpsl": "sl" if not is_buy else "tp"
-                    }
-                },
+                coin,
+                is_buy,
+                amount_q,
+                None,  # No limit price for market-trigger orders
+                order_type_obj,
                 cloid=cloid
             )
 
@@ -480,7 +541,7 @@ class Trading:
             Cancel response
         """
         try:
-            return self.exchange.cancel(coin=coin, oid=order_id)
+            return self.exchange.cancel(coin, order_id)
         except Exception as e:
             raise RuntimeError(f"Failed to cancel order: {e}")
 
