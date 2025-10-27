@@ -240,6 +240,35 @@ class Tracker:
         except Exception as e:
             raise RuntimeError(f"Failed to get trading summary: {e}")
 
+    def get_usdc_balance(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Get USDC balance information including total and available balance.
+
+        Args:
+            force_refresh: Force refresh of data instead of using cache
+
+        Returns:
+            Dictionary containing balance information:
+            - total_balance: Total account value in USD
+            - available_balance: Available/withdrawable balance in USD
+            - margin_used: Total margin currently used
+            - account_value: Account value (same as total_balance)
+        """
+        user_state = self._get_user_state(force_refresh)
+
+        margin_summary = user_state.get("marginSummary", {})
+        withdrawable = float(user_state.get("withdrawable", 0))
+        account_value = float(margin_summary.get("accountValue", 0))
+        total_margin_used = float(margin_summary.get("totalMarginUsed", 0))
+
+        return {
+            "total_balance": account_value,
+            "available_balance": withdrawable,
+            "margin_used": total_margin_used,
+            "account_value": account_value,  # Alias for backward compatibility
+            "timestamp": time.time()
+        }
+
     def clear_cache(self):
         """Clear cached data to force fresh API calls."""
         self._cached_user_state = None

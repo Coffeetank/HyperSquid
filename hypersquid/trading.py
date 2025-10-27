@@ -574,6 +574,32 @@ class Trading:
         except Exception as e:
             raise RuntimeError(f"Failed to get position size: {e}")
 
+    def get_usdc_balance(self) -> Dict[str, Any]:
+        """
+        Get comprehensive USDC balance information.
+
+        Returns:
+            Dictionary containing:
+            - total_balance: Total account value in USD
+            - available_balance: Available/withdrawable balance in USD
+            - margin_used: Total margin currently used
+        """
+        try:
+            user_state = self.get_account_balance()
+            margin_summary = user_state.get("marginSummary", {})
+            withdrawable = float(user_state.get("withdrawable", 0))
+            account_value = float(margin_summary.get("accountValue", 0))
+            total_margin_used = float(margin_summary.get("totalMarginUsed", 0))
+
+            return {
+                "total_balance": account_value,
+                "available_balance": withdrawable,
+                "margin_used": total_margin_used,
+                "timestamp": time.time()
+            }
+        except Exception as e:
+            raise RuntimeError(f"Failed to get USDC balance: {e}")
+
     def get_available_balance(self) -> float:
         """
         Get available balance for trading.
@@ -581,8 +607,5 @@ class Trading:
         Returns:
             Available balance in USD
         """
-        try:
-            user_state = self.get_account_balance()
-            return float(user_state.get("withdrawable", 0))
-        except Exception as e:
-            raise RuntimeError(f"Failed to get available balance: {e}")
+        balance_info = self.get_usdc_balance()
+        return balance_info["available_balance"]
