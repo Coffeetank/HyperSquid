@@ -113,8 +113,7 @@ class CopyTrader:
 
             # Trade absolute difference
             trade_amount = abs(diff)
-            # For market orders, we can't use reduce_only directly
-            # Instead, we need to be more careful about position sizing
+            # For market orders, we handle position reduction by sizing appropriately
             # If moving opposite to current position, reduce the position
             if current_tgt_size != 0 and (current_tgt_size > 0) != (diff > 0):
                 # This is reducing the position - use the smaller of trade_amount and current position size
@@ -197,8 +196,7 @@ class CopyTrader:
                         "order_type": 'stop_market' if is_market else 'stop_limit',
                         "amount": t_order_sz,
                         "price": (trig_px if not is_market else None),
-                        "stop_price": trig_px,
-                        "reduce_only": True
+                        "stop_price": trig_px
                     })
 
             # Cancel any extra triggers on target not present in source
@@ -270,8 +268,7 @@ class CopyTrader:
                     order_type=t["order_type"],
                     amount=t["amount"],
                     price=t.get("price"),
-                    stop_price=t["stop_price"],
-                    reduce_only=t.get("reduce_only", True)
+                    stop_price=t["stop_price"]
                 )
             )
 

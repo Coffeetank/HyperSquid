@@ -4,6 +4,7 @@ from hyperliquid.utils import constants
 from hyperliquid.utils.types import Cloid
 import eth_account
 import time
+from decimal import Decimal, ROUND_DOWN
 
 
 class Trading:
@@ -47,6 +48,42 @@ class Trading:
 
         # Store vault address for sub-account trading
         self.vault_address = vault_address
+        self._meta_cache: Optional[Dict[str, Any]] = None
+
+    def _get_meta(self) -> Dict[str, Any]:
+        if self._meta_cache is None:
+            # meta() returns a dict with 'universe' describing assets
+            self._meta_cache = self.exchange.info.meta()
+        return self._meta_cache
+
+    def _get_asset_entry(self, coin: str) -> Optional[Dict[str, Any]]:
+        meta = self._get_meta()
+        for asset in meta.get("universe", []):
+            if asset.get("name") == coin:
+                return asset
+        return None
+
+    def _quantize_size(self, coin: str, amount: float) -> float:
+        asset = self._get_asset_entry(coin)
+        if not asset:
+            # Fallback: no asset metadata found, return original amount
+            return amount
+        sz_decimals = int(asset.get("szDecimals", 0))
+        step = Decimal("1") / (Decimal(10) ** sz_decimals)
+        q = (Decimal(str(amount))).quantize(step, rounding=ROUND_DOWN)
+        return float(q)
+
+    def _quantize_price(self, coin: str, price: Optional[float]) -> Optional[float]:
+        if price is None:
+            return None
+        asset = self._get_asset_entry(coin)
+        if not asset:
+            return price
+        # Some metadata may include pxDecimals; fall back to 2 if missing
+        px_decimals = int(asset.get("pxDecimals", 2))
+        step = Decimal("1") / (Decimal(10) ** px_decimals)
+        q = (Decimal(str(price))).quantize(step, rounding=ROUND_DOWN)
+        return float(q)
 
     def place_order(
         self,
@@ -56,7 +93,6 @@ class Trading:
         amount: float,
         price: Optional[float] = None,
         leverage: Optional[Union[int, float]] = None,
-        reduce_only: bool = False,
         take_profit: Optional[Dict[str, Any]] = None,
         stop_loss: Optional[Dict[str, Any]] = None,
         client_order_id: Optional[str] = None,
@@ -72,7 +108,6 @@ class Trading:
             amount: Order size/amount
             price: Limit price (required for limit orders, optional for others)
             leverage: Leverage multiplier (optional)
-            reduce_only: Whether order should only reduce position
             take_profit: TP configuration dict (optional)
             stop_loss: SL configuration dict (optional)
             client_order_id: Custom order ID (optional)
@@ -100,7 +135,6 @@ class Trading:
                     coin=coin,
                     is_buy=is_buy,
                     amount=amount,
-                    reduce_only=reduce_only,
                     cloid=cloid
                 )
 
@@ -112,7 +146,6 @@ class Trading:
                     is_buy=is_buy,
                     amount=amount,
                     price=price,
-                    reduce_only=reduce_only,
                     cloid=cloid,
                     **kwargs
                 )
@@ -124,7 +157,6 @@ class Trading:
                     is_buy=is_buy,
                     amount=amount,
                     price=price,
-                    reduce_only=reduce_only,
                     cloid=cloid,
                     **kwargs
                 )
@@ -137,7 +169,6 @@ class Trading:
                     amount=amount,
                     price=price,
                     stop_price=kwargs.get('stop_price'),
-                    reduce_only=reduce_only,
                     cloid=cloid,
                     **kwargs
                 )
@@ -149,7 +180,6 @@ class Trading:
                     amount=amount,
                     price=price,
                     duration=kwargs.get('duration', 60),  # Default 60 seconds
-                    reduce_only=reduce_only,
                     cloid=cloid,
                     **kwargs
                 )
@@ -165,28 +195,28 @@ class Trading:
         coin: str,
         is_buy: bool,
         amount: float,
-        reduce_only: bool = False,
         cloid: Optional[Cloid] = None
     ) -> Dict[str, Any]:
         """Place a market order."""
+        amount_q = self._quantize_size(coin, amount)
+        if amount_q <= 0:
+            raise ValueError("Order size becomes zero after quantization")
         if is_buy:
             return self.exchange.market_open(
                 name=coin,
                 is_buy=True,
-                sz=amount,
+                sz=amount_q,
                 px=None,  # Market price
                 slippage=0.01,  # 1% slippage protection
-                reduce_only=reduce_only,
                 cloid=cloid
             )
         else:
             return self.exchange.market_open(
                 name=coin,
                 is_buy=False,
-                sz=amount,
+                sz=amount_q,
                 px=None,  # Market price
                 slippage=0.01,  # 1% slippage protection
-                reduce_only=reduce_only,
                 cloid=cloid
             )
 
@@ -196,20 +226,22 @@ class Trading:
         is_buy: bool,
         amount: float,
         price: float,
-        reduce_only: bool = False,
         cloid: Optional[Cloid] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Place a limit order."""
         tif = kwargs.get('time_in_force', 'Gtc')  # Good 'til canceled by default
+        amount_q = self._quantize_size(coin, amount)
+        price_q = self._quantize_price(coin, price)
+        if amount_q <= 0:
+            raise ValueError("Order size becomes zero after quantization")
 
         return self.exchange.order(
             coin=coin,
             is_buy=is_buy,
-            sz=amount,
-            limit_px=price,
+            sz=amount_q,
+            limit_px=price_q,
             order_type={"limit": {"tif": tif}},
-            reduce_only=reduce_only,
             cloid=cloid
         )
 
@@ -219,7 +251,6 @@ class Trading:
         is_buy: bool,
         amount: float,
         price: Optional[float] = None,
-        reduce_only: bool = False,
         cloid: Optional[Cloid] = None,
         **kwargs
     ) -> Dict[str, Any]:
@@ -238,12 +269,17 @@ class Trading:
             level_price = price * (1 + (scale_factor * i) * (1 if is_buy else -1))
             level_amount = amount / levels
 
+            # Quantize per level
+            level_amount_q = self._quantize_size(coin, level_amount)
+            level_price_q = self._quantize_price(coin, level_price)
+            if level_amount_q <= 0:
+                continue
+
             order_result = self._place_limit_order(
                 coin=coin,
                 is_buy=is_buy,
-                amount=level_amount,
-                price=level_price,
-                reduce_only=reduce_only,
+                amount=level_amount_q,
+                price=level_price_q,
                 cloid=cloid
             )
             orders.append(order_result)
@@ -258,13 +294,17 @@ class Trading:
         amount: float,
         price: Optional[float] = None,
         stop_price: Optional[float] = None,
-        reduce_only: bool = False,
         cloid: Optional[Cloid] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Place a stop order (stop-limit or stop-market)."""
         if stop_price is None:
             raise ValueError("stop_price is required for stop orders")
+        amount_q = self._quantize_size(coin, amount)
+        price_q = self._quantize_price(coin, price)
+        stop_price_q = self._quantize_price(coin, stop_price)
+        if amount_q <= 0:
+            raise ValueError("Order size becomes zero after quantization")
 
         if order_type == 'stop_limit':
             if price is None:
@@ -273,16 +313,15 @@ class Trading:
             return self.exchange.order(
                 coin=coin,
                 is_buy=is_buy,
-                sz=amount,
-                limit_px=price,
+                sz=amount_q,
+                limit_px=price_q,
                 order_type={
                     "trigger": {
-                        "triggerPx": stop_price,
+                        "triggerPx": stop_price_q,
                         "isMarket": False,
                         "tpsl": "sl" if not is_buy else "tp"
                     }
                 },
-                reduce_only=reduce_only,
                 cloid=cloid
             )
 
@@ -290,16 +329,15 @@ class Trading:
             return self.exchange.order(
                 coin=coin,
                 is_buy=is_buy,
-                sz=amount,
-                limit_px=stop_price,  # Market orders use stop price as limit
+                sz=amount_q,
+                limit_px=stop_price_q,  # Market orders use stop price as limit
                 order_type={
                     "trigger": {
-                        "triggerPx": stop_price,
+                        "triggerPx": stop_price_q,
                         "isMarket": True,
                         "tpsl": "sl" if not is_buy else "tp"
                     }
                 },
-                reduce_only=reduce_only,
                 cloid=cloid
             )
 
@@ -310,7 +348,6 @@ class Trading:
         amount: float,
         price: Optional[float] = None,
         duration: int = 60,
-        reduce_only: bool = False,
         cloid: Optional[Cloid] = None,
         **kwargs
     ) -> Dict[str, Any]:
@@ -329,7 +366,6 @@ class Trading:
                     is_buy=is_buy,
                     amount=interval_amount,
                     price=price,
-                    reduce_only=reduce_only,
                     cloid=cloid
                 )
             else:
@@ -338,7 +374,6 @@ class Trading:
                     coin=coin,
                     is_buy=is_buy,
                     amount=interval_amount,
-                    reduce_only=reduce_only,
                     cloid=cloid
                 )
 
