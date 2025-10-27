@@ -113,15 +113,18 @@ class CopyTrader:
 
             # Trade absolute difference
             trade_amount = abs(diff)
-            # Place market order with reduce_only if moving opposite to current position direction
-            reduce_only = (current_tgt_size != 0 and (current_tgt_size > 0) != (diff > 0))
+            # For market orders, we can't use reduce_only directly
+            # Instead, we need to be more careful about position sizing
+            # If moving opposite to current position, reduce the position
+            if current_tgt_size != 0 and (current_tgt_size > 0) != (diff > 0):
+                # This is reducing the position - use the smaller of trade_amount and current position size
+                trade_amount = min(trade_amount, abs(current_tgt_size))
 
             position_adjustments.append({
                 "type": "market_order",
                 "coin": coin,
                 "side": side,
-                "amount": trade_amount,
-                "reduce_only": reduce_only
+                "amount": trade_amount
             })
 
         # Step 2: Replicate TP/SL triggers exactly, scaled by size
@@ -223,8 +226,7 @@ class CopyTrader:
         if plan["position_adjustments"]:
             lines.append("Position adjustments (market):")
             for a in plan["position_adjustments"]:
-                ro = " (reduce-only)" if a.get("reduce_only") else ""
-                lines.append(f"- {a['coin']}: {a['side']} {a['amount']} {ro}")
+                lines.append(f"- {a['coin']}: {a['side']} {a['amount']}")
         if plan["triggers_to_create"]:
             lines.append("Create TP/SL triggers:")
             for t in plan["triggers_to_create"]:
@@ -251,8 +253,7 @@ class CopyTrader:
                     coin=a["coin"],
                     side=a["side"],
                     order_type='market',
-                    amount=a["amount"],
-                    reduce_only=a.get("reduce_only", False)
+                    amount=a["amount"]
                 )
             )
 
